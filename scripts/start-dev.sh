@@ -67,6 +67,7 @@ start_process() {
 start_process "api" "\"$PYTHON_BIN\" -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload"
 start_process "producer" "\"$PYTHON_BIN\" -m uvicorn producer.main:app --host 0.0.0.0 --port 8001 --reload"
 start_process "worker" "\"$PYTHON_BIN\" processor/worker.py"
+start_process "youtube-ingestor" "\"$PYTHON_BIN\" -m youtube_ingestor.worker"
 
 cat <<EOF
 API dashboard: http://localhost:8000

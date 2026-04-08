@@ -19,10 +19,12 @@ from config import settings
 class IngestRequest(BaseModel):
     source_id: str = Field(..., min_length=1, max_length=255)
     text: str = Field(..., min_length=1)
+    video_id: str | None = Field(default=None, max_length=32)
+    author: str | None = Field(default=None, max_length=255)
 
 
 def serialize_message(value: dict[str, str]) -> bytes:
-    return json.dumps(value).encode("utf-8")
+    return json.dumps(value, ensure_ascii=False).encode("utf-8")
 
 
 @asynccontextmanager
@@ -56,6 +58,8 @@ async def ingest_vibe(payload: IngestRequest, request: Request) -> dict[str, obj
     event = {
         "source_id": payload.source_id,
         "text": payload.text.strip(),
+        "video_id": payload.video_id.strip() if payload.video_id else None,
+        "author": payload.author.strip() if payload.author else None,
         "received_at": datetime.now(timezone.utc).isoformat(),
     }
     metadata = await producer.send_and_wait(settings.raw_vibe_topic, event)

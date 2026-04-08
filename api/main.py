@@ -1,18 +1,51 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
-from sqlalchemy import func, select
+import httpx
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
+from sqlalchemy import Select, and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
 from database import SessionLocal, get_session, init_models
-from models import Sentiment
+from models import Sentiment, TrackedVideo
+from youtube_api import YouTubeApiError, extract_video_id, fetch_video_metadata
+
+# Indexing Performance Gain
+# \[
+# \text{Sequential scan complexity} = O(N)
+# \]
+# \[
+# \text{Indexed lookup complexity} = O(\log N)
+# \]
+# \[
+# \frac{N}{\log_2(N)} = \frac{1{,}000{,}000}{\log_2(1{,}000{,}000)}
+# \approx \frac{1{,}000{,}000}{20} = 50{,}000
+# \]
+# With a B-Tree index on \(video\_id\), the lookup is approximately
+# \(50{,}000\times\) faster than a full sequential scan at \(N = 1{,}000{,}000\).
 
 INDEX_FILE = Path(__file__).with_name("index.html")
+DASHBOARD_SCRIPT = Path(__file__).with_name("dashboard.js")
+
+
+class Utf8JSONResponse(JSONResponse):
+    media_type = "application/json; charset=utf-8"
+
+    def render(self, content: object) -> bytes:
+        return json.dumps(content, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+
+
+class TrackVideoRequest(BaseModel):
+    video: str = Field(..., min_length=1, max_length=500)
 
 
 @asynccontextmanager
@@ -21,17 +54,150 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="VibeStream Dashboard", lifespan=lifespan)
+app = FastAPI(
+    title="VibeStream Dashboard",
+    lifespan=lifespan,
+    default_response_class=Utf8JSONResponse,
+)
 
 
 def serialize_sentiment(sentiment: Sentiment) -> dict[str, object]:
     return {
         "id": sentiment.id,
         "source_id": sentiment.source_id,
+        "video_id": sentiment.video_id,
+        "author": sentiment.author,
         "text": sentiment.text,
         "score": sentiment.score,
         "timestamp": sentiment.timestamp.isoformat(),
     }
+
+
+def serialize_analytics(
+    *,
+    video_id: str | None,
+    title: str | None,
+    total_messages: int,
+    average_score: float | None,
+    min_score: float | None,
+    max_score: float | None,
+    recent: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "video_id": video_id,
+        "title": title,
+        "total_messages": total_messages,
+        "average_score": average_score,
+        "min_score": min_score,
+        "max_score": max_score,
+    }
+    if recent is not None:
+        payload["recent"] = recent
+    return payload
+
+
+def serialize_tracked_video_row(row: object) -> dict[str, object]:
+    mapping = row._mapping
+    average_score = mapping["average_score"]
+    return {
+        "id": mapping["id"],
+        "video_id": mapping["video_id"],
+        "title": mapping["title"],
+        "is_active": mapping["is_active"],
+        "added_at": mapping["added_at"].isoformat(),
+        "message_count": int(mapping["message_count"] or 0),
+        "average_score": float(average_score) if average_score is not None else None,
+    }
+
+
+def sentiment_scope(
+    video_id: str | None = None,
+    *,
+    active_only: bool = True,
+) -> tuple[object | None, object | None, list[object]]:
+    join_target = TrackedVideo
+    join_condition = TrackedVideo.video_id == Sentiment.video_id
+    filters: list[object] = []
+
+    if active_only:
+        join_condition = and_(join_condition, TrackedVideo.is_active.is_(True))
+
+    if video_id is not None:
+        filters.append(Sentiment.video_id == video_id)
+
+    return join_target, join_condition, filters
+
+
+async def fetch_analytics_summary(
+    session: AsyncSession,
+    video_id: str | None = None,
+    *,
+    active_only: bool = True,
+) -> tuple[int, float | None, float | None, float | None]:
+    join_target, join_condition, filters = sentiment_scope(
+        video_id,
+        active_only=active_only,
+    )
+    query = select(
+        func.count(Sentiment.id),
+        func.avg(Sentiment.score),
+        func.min(Sentiment.score),
+        func.max(Sentiment.score),
+    ).select_from(Sentiment)
+
+    if join_target is not None and join_condition is not None:
+        query = query.join(join_target, join_condition)
+
+    for clause in filters:
+        query = query.where(clause)
+
+    result = await session.execute(query)
+    total_messages, average_score, min_score, max_score = result.one()
+    return (
+        int(total_messages or 0),
+        float(average_score) if average_score is not None else None,
+        float(min_score) if min_score is not None else None,
+        float(max_score) if max_score is not None else None,
+    )
+
+
+async def fetch_recent_sentiments(
+    session: AsyncSession,
+    video_id: str | None = None,
+    limit: int = 12,
+    *,
+    active_only: bool = True,
+) -> list[dict[str, object]]:
+    join_target, join_condition, filters = sentiment_scope(
+        video_id,
+        active_only=active_only,
+    )
+    query: Select[tuple[Sentiment]] = select(Sentiment).order_by(
+        Sentiment.timestamp.desc()
+    )
+
+    if join_target is not None and join_condition is not None:
+        query = query.join(join_target, join_condition)
+
+    query = query.limit(limit)
+
+    for clause in filters:
+        query = query.where(clause)
+
+    result = await session.scalars(query)
+    return [serialize_sentiment(item) for item in result.all()]
+
+
+async def get_tracked_video_or_404(
+    session: AsyncSession,
+    video_id: str,
+) -> TrackedVideo:
+    tracked = await session.scalar(
+        select(TrackedVideo).where(TrackedVideo.video_id == video_id)
+    )
+    if tracked is None:
+        raise HTTPException(status_code=404, detail="Tracked video was not found.")
+    return tracked
 
 
 @app.get("/")
@@ -39,32 +205,143 @@ async def index() -> FileResponse:
     return FileResponse(INDEX_FILE)
 
 
+@app.get("/dashboard.js")
+async def dashboard_script() -> FileResponse:
+    return FileResponse(DASHBOARD_SCRIPT, media_type="application/javascript")
+
+
 @app.get("/analytics")
 async def analytics(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
-    summary = await session.execute(
-        select(
-            func.count(Sentiment.id),
-            func.avg(Sentiment.score),
-            func.min(Sentiment.score),
-            func.max(Sentiment.score),
+    total_messages, average_score, min_score, max_score = await fetch_analytics_summary(
+        session
+    )
+    recent_items = await fetch_recent_sentiments(session)
+    return serialize_analytics(
+        video_id=None,
+        title="Global View",
+        total_messages=total_messages,
+        average_score=average_score,
+        min_score=min_score,
+        max_score=max_score,
+        recent=recent_items,
+    )
+
+
+@app.get("/v1/analytics/{video_id}")
+async def video_analytics(
+    video_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    tracked = await get_tracked_video_or_404(session, video_id)
+    total_messages, average_score, min_score, max_score = await fetch_analytics_summary(
+        session,
+        video_id=video_id,
+        active_only=False,
+    )
+    return serialize_analytics(
+        video_id=tracked.video_id,
+        title=tracked.title,
+        total_messages=total_messages,
+        average_score=average_score,
+        min_score=min_score,
+        max_score=max_score,
+    )
+
+
+@app.post("/v1/track")
+async def track_video(
+    payload: TrackVideoRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    if not settings.youtube_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="YOUTUBE_API_KEY is not configured.",
         )
-    )
-    total_messages, average_score, min_score, max_score = summary.one()
 
-    recent_query = await session.scalars(
-        select(Sentiment).order_by(Sentiment.timestamp.desc()).limit(10)
-    )
-    recent_items = [serialize_sentiment(item) for item in recent_query.all()]
+    video_id = extract_video_id(payload.video)
+    if video_id is None:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL or video ID.")
 
+    async with httpx.AsyncClient(
+        timeout=settings.youtube_http_timeout_seconds
+    ) as client:
+        try:
+            metadata = await fetch_video_metadata(
+                client=client,
+                api_base_url=settings.youtube_api_base_url,
+                api_key=settings.youtube_api_key,
+                video_id=video_id,
+            )
+        except YouTubeApiError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    tracked = await session.scalar(
+        select(TrackedVideo).where(TrackedVideo.video_id == metadata.video_id)
+    )
+    if tracked is None:
+        tracked = TrackedVideo(
+            video_id=metadata.video_id,
+            title=metadata.title,
+            is_active=True,
+        )
+        session.add(tracked)
+    else:
+        tracked.title = metadata.title
+        tracked.is_active = True
+
+    await session.commit()
+    await session.refresh(tracked)
     return {
-        "total_messages": total_messages,
-        "average_score": float(average_score) if average_score is not None else None,
-        "min_score": float(min_score) if min_score is not None else None,
-        "max_score": float(max_score) if max_score is not None else None,
-        "recent": recent_items,
+        "id": tracked.id,
+        "video_id": tracked.video_id,
+        "title": tracked.title,
+        "is_active": tracked.is_active,
+        "added_at": tracked.added_at.isoformat(),
     }
+
+
+@app.get("/v1/tracked")
+async def list_tracked_videos(
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    query = (
+        select(
+            TrackedVideo.id,
+            TrackedVideo.video_id,
+            TrackedVideo.title,
+            TrackedVideo.is_active,
+            TrackedVideo.added_at,
+            func.count(Sentiment.id).label("message_count"),
+            func.avg(Sentiment.score).label("average_score"),
+        )
+        .select_from(TrackedVideo)
+        .outerjoin(Sentiment, Sentiment.video_id == TrackedVideo.video_id)
+        .group_by(
+            TrackedVideo.id,
+            TrackedVideo.video_id,
+            TrackedVideo.title,
+            TrackedVideo.is_active,
+            TrackedVideo.added_at,
+        )
+        .order_by(TrackedVideo.is_active.desc(), TrackedVideo.added_at.desc())
+    )
+    result = await session.execute(query)
+    items = [serialize_tracked_video_row(row) for row in result.all()]
+    return {"items": items}
+
+
+@app.delete("/v1/track/{video_id}")
+async def delete_tracked_video(
+    video_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    tracked = await get_tracked_video_or_404(session, video_id)
+    tracked.is_active = False
+    await session.commit()
+    return {"deleted": True, "video_id": video_id}
 
 
 @app.websocket("/live-feed")
@@ -77,6 +354,13 @@ async def live_feed(websocket: WebSocket) -> None:
             async with SessionLocal() as session:
                 result = await session.scalars(
                     select(Sentiment)
+                    .join(
+                        TrackedVideo,
+                        and_(
+                            TrackedVideo.video_id == Sentiment.video_id,
+                            TrackedVideo.is_active.is_(True),
+                        ),
+                    )
                     .where(Sentiment.id > last_seen_id)
                     .order_by(Sentiment.id.asc())
                     .limit(25)

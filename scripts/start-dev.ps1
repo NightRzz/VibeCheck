@@ -45,6 +45,10 @@ $processes = @(
     @{
         Title = "VibeCheck Worker"
         Command = "& '$python' -m processor.worker"
+    },
+    @{
+        Title = "VibeCheck YouTube Ingestor"
+        Command = "& '$python' -m youtube_ingestor.worker"
     }
 )
 
@@ -57,4 +61,4 @@ foreach ($process in $processes) {
 
 Write-Host "API dashboard: http://localhost:8000"
 Write-Host "Producer ingest: http://localhost:8001/ingest"
-Write-Host "Worker running in separate PowerShell window."
+Write-Host "Worker and YouTube ingestor running in separate PowerShell windows."
