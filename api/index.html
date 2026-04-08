@@ -302,12 +302,18 @@
     const totalCount = document.getElementById("total-count");
     const avgScore = document.getElementById("avg-score");
     const scoreRange = document.getElementById("score-range");
-    const gauge = document.getElementById("gauge");
     const gaugeScore = document.getElementById("gauge-score");
     const latestText = document.getElementById("latest-text");
     const latestSource = document.getElementById("latest-source");
     const latestTime = document.getElementById("latest-time");
     const feedList = document.getElementById("feed-list");
+    const analyticsState = {
+      totalMessages: 0,
+      averageScore: 0,
+      minScore: 0,
+      maxScore: 0,
+      hasData: false,
+    };
 
     function getScoreColor(score) {
       if (score >= 0.25) {
@@ -332,6 +338,52 @@
         return "n/a";
       }
       return new Date(value).toLocaleString();
+    }
+
+    function renderSummary() {
+      totalCount.textContent = analyticsState.totalMessages;
+
+      if (!analyticsState.hasData) {
+        avgScore.textContent = "0.00";
+        scoreRange.textContent = "0.00 / 0.00";
+        setGauge(0);
+        return;
+      }
+
+      avgScore.textContent = analyticsState.averageScore.toFixed(2);
+      scoreRange.textContent =
+        `${analyticsState.minScore.toFixed(2)} / ${analyticsState.maxScore.toFixed(2)}`;
+    }
+
+    function syncAnalyticsState(payload) {
+      analyticsState.totalMessages = Number(payload.total_messages ?? 0);
+      analyticsState.averageScore = Number(payload.average_score ?? 0);
+      analyticsState.minScore = Number(payload.min_score ?? 0);
+      analyticsState.maxScore = Number(payload.max_score ?? 0);
+      analyticsState.hasData = analyticsState.totalMessages > 0;
+      renderSummary();
+    }
+
+    function applyLiveUpdate(item) {
+      const score = Number(item.score);
+
+      if (!analyticsState.hasData) {
+        analyticsState.totalMessages = 1;
+        analyticsState.averageScore = score;
+        analyticsState.minScore = score;
+        analyticsState.maxScore = score;
+        analyticsState.hasData = true;
+      } else {
+        const previousTotal = analyticsState.totalMessages;
+        const nextTotal = previousTotal + 1;
+        analyticsState.averageScore =
+          ((analyticsState.averageScore * previousTotal) + score) / nextTotal;
+        analyticsState.totalMessages = nextTotal;
+        analyticsState.minScore = Math.min(analyticsState.minScore, score);
+        analyticsState.maxScore = Math.max(analyticsState.maxScore, score);
+      }
+
+      renderSummary();
     }
 
     function renderFeedItem(item) {
@@ -362,10 +414,7 @@
     async function loadAnalytics() {
       const response = await fetch("/analytics");
       const payload = await response.json();
-
-      totalCount.textContent = payload.total_messages;
-      avgScore.textContent = payload.average_score === null ? "0.00" : payload.average_score.toFixed(2);
-      scoreRange.textContent = `${(payload.min_score ?? 0).toFixed(2)} / ${(payload.max_score ?? 0).toFixed(2)}`;
+      syncAnalyticsState(payload);
 
       feedList.innerHTML = "";
       for (const item of payload.recent) {
@@ -374,8 +423,6 @@
 
       if (payload.recent.length > 0) {
         hydrateLatest(payload.recent[0]);
-      } else {
-        setGauge(0);
       }
     }
 
@@ -385,13 +432,12 @@
 
       socket.onmessage = (event) => {
         const item = JSON.parse(event.data);
+        applyLiveUpdate(item);
         hydrateLatest(item);
         feedList.prepend(renderFeedItem(item));
         while (feedList.children.length > 8) {
           feedList.removeChild(feedList.lastChild);
         }
-
-        totalCount.textContent = Number(totalCount.textContent) + 1;
       };
 
       socket.onclose = () => {
