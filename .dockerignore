@@ -1,0 +1,11 @@
+.git
+.gitignore
+.idea
+.run
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+devvit_app/node_modules

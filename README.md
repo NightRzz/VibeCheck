@@ -1,124 +1,103 @@
 # VibeCheck
 
-VibeCheck is a small real-time sentiment pipeline. A FastAPI producer accepts raw text, Kafka carries the events, a worker scores them with TextBlob and writes the results to PostgreSQL, and a dashboard API streams live analytics to the browser over WebSockets.
+VibeCheck is a modern, real-time sentiment analysis pipeline built for live streaming platforms. It actively monitors YouTube Live chat streams, computes sentiment scores on incoming messages in real-time, and streams the analytics directly to a sleek Next.js dashboard via WebSockets.
 
-The stack is intentionally simple:
+Designed with a robust, event-driven architecture, VibeCheck is built to handle high-throughput chat streams efficiently and reliably.
 
-- Apache Kafka 4.1 in KRaft mode
-- PostgreSQL 18
-- FastAPI for the ingest and dashboard services
-- SQLAlchemy 2 async with `asyncpg`
-- TextBlob for sentiment scoring
+## Features
 
-## Project layout
+- **Multi-Stream Tracking:** Simultaneously track and analyze multiple active YouTube Live streams.
+- **Real-Time Sentiment Analysis:** Instantly scores incoming messages using Natural Language Processing (TextBlob).
+- **Live Dashboard:** A responsive, modern React/Next.js dashboard that visualizes sentiment trends and streams live chat messages over WebSockets.
+- **Robust Event Pipeline:** Utilizes Apache Kafka for reliable, decoupled message ingestion and processing.
+- **Deduplication:** Ensures data integrity by strictly deduplicating messages at the database level.
+- **Fully Dockerized:** Spin up the entire multi-container architecture with a single command.
 
-`producer/main.py` exposes `POST /ingest` and publishes messages to the `raw-vibe-data` topic.  
-`processor/worker.py` consumes Kafka messages, computes sentiment, and stores rows in `sentiments`.  
-`api/main.py` serves `GET /analytics`, `GET /`, and `WebSocket /live-feed`.  
-`api/index.html` is the dashboard UI.  
-`docker-compose.yml` starts PostgreSQL and Kafka for local development.
+## Architecture
 
-## Requirements
+VibeCheck is composed of several independent microservices:
 
-Use Python 3.11+ and Docker. On Windows that usually means Docker Desktop; on Linux any working Docker daemon is fine.
+1. **Frontend Dashboard (`frontend/`):** A Next.js application providing the user interface. It connects to the API via REST for statistics and WebSockets for the live feed.
+2. **API Service (`api/main.py`):** A FastAPI application that serves global and video-specific analytics, manages tracked streams, and broadcasts new sentiment rows to connected WebSocket clients.
+3. **YouTube Ingestor (`youtube_ingestor/worker.py`):** A background worker that continuously polls the YouTube API for new live chat comments across all tracked videos, publishing them to Kafka.
+4. **Sentiment Processor (`processor/worker.py`):** The core Kafka consumer. It reads raw messages, computes the sentiment score using TextBlob, and persists the data into PostgreSQL.
 
-Install the Python dependencies with:
+### Tech Stack
+- **Backend:** Python 3.11+, FastAPI, SQLAlchemy 2 (asyncpg)
+- **Frontend:** TypeScript, React, Next.js, TailwindCSS
+- **Message Broker:** Apache Kafka 4.1 (KRaft mode)
+- **Database:** PostgreSQL 18
+- **NLP:** TextBlob
 
-```bash
-python -m pip install -r requirements.txt
-```
+## Getting Started
 
-## Running locally
+The easiest way to run the entire stack locally is using Docker Compose.
 
-If you want the shortest path, use the helper scripts.
+### Prerequisites
+- Docker & Docker Compose
+- A YouTube Data API Key
 
-On Windows PowerShell:
+### Running with Docker
 
-```powershell
-.\scripts\start-dev.ps1 -InstallDeps
-```
+1. **Set up your YouTube API Key:**
+   Create a `.env` file in the root directory (or export the variable in your shell) and add your key:
+   ```env
+   YOUTUBE_API_KEY=your_api_key_here
+   ```
 
-On Linux or macOS shells:
+2. **Start the stack:**
+   ```bash
+   docker compose up -d --build
+   ```
+   This will spin up PostgreSQL, Kafka, the API (`:8000`), the background workers, and the Next.js Frontend (`:3000`).
 
-```bash
-./scripts/start-dev.sh --install-deps
-```
+3. **View the Dashboard:**
+   Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-Those scripts start PostgreSQL and Kafka with Docker Compose, then launch:
+## Local Development Setup
 
-- the dashboard API on `http://localhost:8000`
-- the producer API on `http://localhost:8001`
-- the worker process that consumes Kafka and writes to Postgres
-
-The PowerShell script opens separate windows. The shell script runs the services in the background and stores logs and PID files in `.run/`.
-
-Open `http://localhost:8000` after the processes are up.
-
-## Sending test traffic
-
-You can post messages by hand:
-
-```powershell
-Invoke-RestMethod -Uri "http://localhost:8001/ingest" `
-  -Method Post `
-  -Headers @{"Content-Type"="application/json"} `
-  -Body '{"source_id":"manual_test","text":"This pipeline feels great."}'
-```
-
-or:
-
-```bash
-curl -X POST http://localhost:8001/ingest \
-  -H 'Content-Type: application/json' \
-  -d '{"source_id":"manual_test","text":"This pipeline feels great."}'
-```
-
-If you want a stream of sample messages instead, use the helper scripts.
-
-PowerShell:
-
-```powershell
-.\scripts\send-sample-vibes.ps1 -Count 20 -DelayMs 500
-```
-
-Shell:
-
-```bash
-./scripts/send-sample-vibes.sh --count 20 --delay-ms 500
-```
-
-As new messages are processed, the dashboard updates the live feed, gauge, total count, average score, and range.
-
-## Running components manually
-
-If you do not want to use the scripts, start infrastructure first:
+If you prefer to run the components manually for active development, start the infrastructure first:
 
 ```bash
 docker compose up -d postgres kafka
 ```
 
-Then run these in separate terminals:
-
+Install the backend Python dependencies:
 ```bash
+python -m pip install -r requirements.txt
+```
+
+Run the backend components in separate terminals:
+```bash
+# Dashboard API
 python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
-python -m uvicorn producer.main:app --host 0.0.0.0 --port 8001 --reload
+
+# Sentiment Processor Worker
 python processor/worker.py
+
+# YouTube Ingestor Worker
+python youtube_ingestor/worker.py
 ```
 
-## API summary
-
-`POST /ingest` accepts:
-
-```json
-{
-  "source_id": "user_123",
-  "text": "This release is solid."
-}
+Run the frontend dashboard:
+```bash
+cd frontend
+npm install
+npm run dev
 ```
 
-`GET /analytics` returns totals, average score, min and max score, plus the latest rows.  
-`WebSocket /live-feed` emits newly processed sentiment rows as they arrive.
+## API Summary
 
-## Notes
+The backend exposes several key endpoints on port `8000`:
 
-This project uses TextBlob for a light sentiment baseline. It is easy to replace `analyze_sentiment()` in `processor/worker.py` with a transformer model later if you need better accuracy.
+- `POST /v1/track`: Start tracking a new YouTube Live video.
+- `DELETE /v1/track/{video_id}`: Stop tracking and delete data for a specific video.
+- `GET /v1/tracked`: List all currently tracked videos and global metrics.
+- `GET /analytics`: Get global sentiment totals and ranges.
+- `GET /v1/analytics/{video_id}`: Get sentiment statistics for a specific video.
+- `WebSocket /live-feed`: Global real-time stream of all processed messages.
+- `WebSocket /live-feed/{video_id}`: Real-time stream of messages for a specific video.
+
+## Notes & Future Improvements
+
+- **NLP Model:** This project currently uses TextBlob to provide a lightweight sentiment baseline. It is intentionally decoupled so that the `analyze_sentiment()` function in `processor/worker.py` can be easily swapped out for a heavier transformer model (e.g., via Hugging Face) if better contextual accuracy is required.

@@ -36,13 +36,96 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_NUM_PARTITIONS: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
     ports:
       - "9092:9092"
-      - "9094:9094"
       - "9093:9093"
+      - "9094:9094"
     volumes:
       - kafka_data:/var/lib/kafka/data
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vibecheck-app:latest
+    container_name: vibecheck-api
+    restart: unless-stopped
+    working_dir: /app
+    command: python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+    environment:
+      DATABASE_URL: postgresql+asyncpg://vibecheck:vibecheck@postgres:5432/vibecheck
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
+      YOUTUBE_POLL_INTERVAL_SECONDS: ${YOUTUBE_POLL_INTERVAL_SECONDS:-5}
+      LIVE_FEED_POLL_INTERVAL_SECONDS: ${LIVE_FEED_POLL_INTERVAL_SECONDS:-0.25}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+
+  processor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vibecheck-app:latest
+    container_name: vibecheck-processor
+    restart: unless-stopped
+    working_dir: /app
+    command: python -m processor.worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://vibecheck:vibecheck@postgres:5432/vibecheck
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    volumes:
+      - .:/app
+
+  youtube-ingestor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vibecheck-app:latest
+    container_name: vibecheck-youtube-ingestor
+    restart: unless-stopped
+    working_dir: /app
+    command: python -m youtube_ingestor.worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://vibecheck:vibecheck@postgres:5432/vibecheck
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
+      YOUTUBE_POLL_INTERVAL_SECONDS: ${YOUTUBE_POLL_INTERVAL_SECONDS:-5}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    volumes:
+      - .:/app
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: vibecheck-frontend:latest
+    container_name: vibecheck-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      API_URL: http://api:8000
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on:
+      - api
 
 volumes:
   postgres_data:
