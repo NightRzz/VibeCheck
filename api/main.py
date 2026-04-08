@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import Select, and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,9 +31,6 @@ from youtube_api import YouTubeApiError, extract_video_id, fetch_video_metadata
 # \]
 # With a B-Tree index on \(video\_id\), the lookup is approximately
 # \(50{,}000\times\) faster than a full sequential scan at \(N = 1{,}000{,}000\).
-
-INDEX_FILE = Path(__file__).with_name("index.html")
-DASHBOARD_SCRIPT = Path(__file__).with_name("dashboard.js")
 
 
 class Utf8JSONResponse(JSONResponse):
@@ -221,16 +218,6 @@ async def get_tracked_video_or_404(
     if tracked is None:
         raise HTTPException(status_code=404, detail="Tracked video was not found.")
     return tracked
-
-
-@app.get("/")
-async def index() -> FileResponse:
-    return FileResponse(INDEX_FILE)
-
-
-@app.get("/dashboard.js")
-async def dashboard_script() -> FileResponse:
-    return FileResponse(DASHBOARD_SCRIPT, media_type="application/javascript")
 
 
 @app.get("/analytics")
