@@ -4,7 +4,7 @@ VibeCheck is a modern, real-time sentiment analysis pipeline built for live stre
 
 Designed with a robust, event-driven architecture, VibeCheck is built to handle high-throughput chat streams efficiently and reliably.
 
-## 🚀 Features
+## Features
 
 - **Multi-Stream Tracking:** Simultaneously track and analyze multiple active YouTube Live streams.
 - **Real-Time Sentiment Analysis:** Instantly scores incoming messages using Natural Language Processing (TextBlob).
@@ -13,7 +13,7 @@ Designed with a robust, event-driven architecture, VibeCheck is built to handle 
 - **Deduplication:** Ensures data integrity by strictly deduplicating messages at the database level.
 - **Fully Dockerized:** Spin up the entire multi-container architecture with a single command.
 
-## 🏗️ Architecture
+## Architecture
 
 VibeCheck is composed of several independent microservices:
 
@@ -29,7 +29,7 @@ VibeCheck is composed of several independent microservices:
 - **Database:** PostgreSQL 18
 - **NLP:** TextBlob
 
-## 🛠️ Getting Started
+## Getting Started
 
 The easiest way to run the entire stack locally is using Docker Compose.
 
@@ -54,7 +54,7 @@ The easiest way to run the entire stack locally is using Docker Compose.
 3. **View the Dashboard:**
    Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-## 💻 Local Development Setup
+## Local Development Setup
 
 If you prefer to run the components manually for active development, start the infrastructure first:
 
@@ -86,7 +86,7 @@ npm install
 npm run dev
 ```
 
-## 📖 API Summary
+## API Summary
 
 The backend exposes several key endpoints on port `8000`:
 
@@ -98,6 +98,6 @@ The backend exposes several key endpoints on port `8000`:
 - `WebSocket /live-feed`: Global real-time stream of all processed messages.
 - `WebSocket /live-feed/{video_id}`: Real-time stream of messages for a specific video.
 
-## 📝 Notes & Future Improvements
+## Notes & Future Improvements
 
 - **NLP Model:** This project currently uses TextBlob to provide a lightweight sentiment baseline. It is intentionally decoupled so that the `analyze_sentiment()` function in `processor/worker.py` can be easily swapped out for a heavier transformer model (e.g., via Hugging Face) if better contextual accuracy is required.
