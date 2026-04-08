@@ -9,14 +9,15 @@ The stack is intentionally simple:
 - FastAPI for the ingest and dashboard services
 - SQLAlchemy 2 async with `asyncpg`
 - TextBlob for sentiment scoring
+- Next.js and React for the frontend dashboard
 
 ## Project layout
 
 `producer/main.py` exposes `POST /ingest` and publishes messages to the `raw-vibe-data` topic.  
 `processor/worker.py` consumes Kafka messages, computes sentiment, and stores rows in `sentiments`.  
-`api/main.py` serves `GET /analytics`, `GET /`, and `WebSocket /live-feed`.  
-`api/index.html` is the dashboard UI.  
-`docker-compose.yml` starts PostgreSQL and Kafka for local development.
+`api/main.py` serves `GET /analytics`, `GET /v1/tracked`, and WebSocket endpoints.  
+`frontend/` contains the Next.js dashboard UI.  
+`docker-compose.yml` starts PostgreSQL, Kafka, and the frontend for local development.
 
 ## Requirements
 
@@ -49,10 +50,11 @@ Those scripts start PostgreSQL and Kafka with Docker Compose, then launch:
 - the dashboard API on `http://localhost:8000`
 - the producer API on `http://localhost:8001`
 - the worker process that consumes Kafka and writes to Postgres
+- the Next.js frontend on `http://localhost:3000`
 
 The PowerShell script opens separate windows. The shell script runs the services in the background and stores logs and PID files in `.run/`.
 
-Open `http://localhost:8000` after the processes are up.
+Open `http://localhost:3000` after the processes are up.
 
 ## Sending test traffic
 

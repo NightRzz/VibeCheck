@@ -58,7 +58,8 @@ services:
       DATABASE_URL: postgresql+asyncpg://vibecheck:vibecheck@postgres:5432/vibecheck
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
-      YOUTUBE_POLL_INTERVAL_SECONDS: ${YOUTUBE_POLL_INTERVAL_SECONDS:-15}
+      YOUTUBE_POLL_INTERVAL_SECONDS: ${YOUTUBE_POLL_INTERVAL_SECONDS:-5}
+      LIVE_FEED_POLL_INTERVAL_SECONDS: ${LIVE_FEED_POLL_INTERVAL_SECONDS:-0.25}
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,7 +83,8 @@ services:
       DATABASE_URL: postgresql+asyncpg://vibecheck:vibecheck@postgres:5432/vibecheck
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
-      YOUTUBE_POLL_INTERVAL_SECONDS: ${YOUTUBE_POLL_INTERVAL_SECONDS:-15}
+      YOUTUBE_POLL_INTERVAL_SECONDS: ${YOUTUBE_POLL_INTERVAL_SECONDS:-5}
+      LIVE_FEED_POLL_INTERVAL_SECONDS: ${LIVE_FEED_POLL_INTERVAL_SECONDS:-0.25}
     depends_on:
       postgres:
         condition: service_healthy
@@ -126,7 +128,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://vibecheck:vibecheck@postgres:5432/vibecheck
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
-      YOUTUBE_POLL_INTERVAL_SECONDS: ${YOUTUBE_POLL_INTERVAL_SECONDS:-15}
+      YOUTUBE_POLL_INTERVAL_SECONDS: ${YOUTUBE_POLL_INTERVAL_SECONDS:-5}
     depends_on:
       postgres:
         condition: service_healthy
@@ -134,6 +136,21 @@ services:
         condition: service_started
     volumes:
       - .:/app
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: vibecheck-frontend:latest
+    container_name: vibecheck-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      API_URL: http://api:8000
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on:
+      - api
 
 volumes:
   postgres_data:

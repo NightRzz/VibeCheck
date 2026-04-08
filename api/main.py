@@ -7,6 +7,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import Select, and_, delete, func, select
@@ -58,6 +59,14 @@ app = FastAPI(
     title="VibeStream Dashboard",
     lifespan=lifespan,
     default_response_class=Utf8JSONResponse,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -254,6 +263,10 @@ async def video_analytics(
         video_id=video_id,
         active_only=False,
     )
+    
+    # We will also fetch recent sentiments for this specific video here
+    recent_items = await fetch_recent_sentiments(session, video_id=video_id, limit=50, active_only=False)
+
     return serialize_analytics(
         video_id=tracked.video_id,
         title=tracked.title,
@@ -261,14 +274,18 @@ async def video_analytics(
         average_score=average_score,
         min_score=min_score,
         max_score=max_score,
+        recent=recent_items,
     )
 
 
 @app.post("/v1/track")
+@app.options("/v1/track")
 async def track_video(
-    payload: TrackVideoRequest,
+    payload: TrackVideoRequest = None, # type: ignore
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
+    if payload is None:
+        return {}
     if not settings.youtube_api_key:
         raise HTTPException(
             status_code=503,
@@ -362,6 +379,43 @@ async def delete_tracked_video(
     return {"deleted": True, "video_id": video_id}
 
 
+@app.websocket("/live-feed/{video_id}")
+async def live_feed_by_video(websocket: WebSocket, video_id: str) -> None:
+    await websocket.accept()
+    try:
+        last_seen_id = max(int(websocket.query_params.get("last_seen_id", "0")), 0)
+    except ValueError:
+        last_seen_id = 0
+
+    try:
+        while True:
+            async with SessionLocal() as session:
+                query = (
+                    select(Sentiment)
+                    .join(
+                        TrackedVideo,
+                        and_(
+                            TrackedVideo.video_id == Sentiment.video_id,
+                            TrackedVideo.is_active.is_(True),
+                        ),
+                    )
+                    .where(Sentiment.id > last_seen_id)
+                    .where(Sentiment.video_id == video_id)
+                    .order_by(Sentiment.id.asc())
+                    .limit(settings.live_feed_batch_size)
+                )
+                result = await session.scalars(query)
+                updates = result.all()
+
+            for item in updates:
+                await websocket.send_json(serialize_sentiment(item))
+                last_seen_id = item.id
+
+            await asyncio.sleep(settings.live_feed_poll_interval_seconds)
+    except WebSocketDisconnect:
+        return
+
+
 @app.websocket("/live-feed")
 async def live_feed(websocket: WebSocket) -> None:
     await websocket.accept()
@@ -384,7 +438,7 @@ async def live_feed(websocket: WebSocket) -> None:
                     )
                     .where(Sentiment.id > last_seen_id)
                     .order_by(Sentiment.id.asc())
-                    .limit(25)
+                    .limit(settings.live_feed_batch_size)
                 )
                 updates = result.all()
 
@@ -392,6 +446,6 @@ async def live_feed(websocket: WebSocket) -> None:
                 await websocket.send_json(serialize_sentiment(item))
                 last_seen_id = item.id
 
-            await asyncio.sleep(1)
+            await asyncio.sleep(settings.live_feed_poll_interval_seconds)
     except WebSocketDisconnect:
         return

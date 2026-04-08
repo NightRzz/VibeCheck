@@ -15,6 +15,17 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str = os.getenv(
@@ -45,6 +56,11 @@ class Settings:
         "YOUTUBE_HTTP_TIMEOUT_SECONDS",
         15,
     )
+    live_feed_poll_interval_seconds: float = _env_float(
+        "LIVE_FEED_POLL_INTERVAL_SECONDS",
+        0.25,
+    )
+    live_feed_batch_size: int = _env_int("LIVE_FEED_BATCH_SIZE", 25)
 
 
 settings = Settings()
