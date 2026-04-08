@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from aiokafka import AIOKafkaConsumer
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from textblob import TextBlob
 
@@ -32,6 +33,19 @@ logger = logging.getLogger(__name__)
 # \[
 # \frac{60{,}000 \text{ ms}}{50 \text{ ms/comment}} = 1{,}200 \text{ comments per 60-second window}
 # \]
+#
+# Index Maintenance Cost
+# \[
+# 10^6 \text{ comments} \times 100 \frac{\text{bytes}}{\text{index row}}
+# = 100{,}000{,}000 \text{ bytes}
+# \]
+# \[
+# 100{,}000{,}000 \text{ bytes} \times \frac{1 \text{ MB}}{1024^2 \text{ bytes}}
+# \approx 95.37 \text{ MB}
+# \]
+# The unique index on \(external\_id\) costs about \(95 \text{ MB}\) for
+# \(1{,}000{,}000\) comments, which is a small tax compared to the total data
+# volume and is worth paying for deduplication integrity.
 
 
 @dataclass
@@ -39,6 +53,7 @@ class RawVibeMessage:
     source_id: str
     text: str
     video_id: str | None = None
+    external_id: str | None = None
     author: str | None = None
     received_at: str | None = None
 
@@ -49,6 +64,7 @@ def deserialize_message(value: bytes) -> RawVibeMessage:
         source_id=payload["source_id"],
         text=payload["text"],
         video_id=payload.get("video_id"),
+        external_id=payload.get("external_id"),
         author=payload.get("author"),
         received_at=payload.get("received_at"),
     )
@@ -67,19 +83,28 @@ def parse_received_at(value: str | None) -> datetime:
 
 async def persist_sentiment(
     session: AsyncSession, message: RawVibeMessage
-) -> Sentiment:
-    sentiment = Sentiment(
-        source_id=message.source_id,
-        video_id=message.video_id,
-        author=message.author,
-        text=message.text,
-        score=analyze_sentiment(message.text),
-        timestamp=parse_received_at(message.received_at),
+) -> Sentiment | None:
+    statement = (
+        insert(Sentiment)
+        .values(
+            source_id=message.source_id,
+            video_id=message.video_id,
+            external_id=message.external_id,
+            author=message.author,
+            text=message.text,
+            score=analyze_sentiment(message.text),
+            timestamp=parse_received_at(message.received_at),
+        )
+        .on_conflict_do_nothing(index_elements=[Sentiment.external_id])
+        .returning(Sentiment.id)
     )
-    session.add(sentiment)
+    result = await session.execute(statement)
     await session.commit()
-    await session.refresh(sentiment)
-    return sentiment
+    sentiment_id = result.scalar_one_or_none()
+    if sentiment_id is None:
+        return None
+
+    return await session.get(Sentiment, sentiment_id)
 
 
 async def process_stream() -> None:
@@ -98,6 +123,13 @@ async def process_stream() -> None:
                 payload = deserialize_message(message.value)
                 async with SessionLocal() as session:
                     saved = await persist_sentiment(session, payload)
+                if saved is None:
+                    logger.info(
+                        "Skipped duplicate sentiment external_id=%s source_id=%s",
+                        payload.external_id,
+                        payload.source_id,
+                    )
+                    continue
                 logger.info(
                     "Stored sentiment id=%s source_id=%s score=%.3f",
                     saved.id,

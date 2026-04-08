@@ -9,7 +9,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import Select, and_, func, select
+from sqlalchemy import Select, and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -107,6 +107,20 @@ def serialize_tracked_video_row(row: object) -> dict[str, object]:
         "added_at": mapping["added_at"].isoformat(),
         "message_count": int(mapping["message_count"] or 0),
         "average_score": float(average_score) if average_score is not None else None,
+    }
+
+
+def serialize_global_summary(rows: list[dict[str, object]]) -> dict[str, object]:
+    active_rows = [row for row in rows if row["is_active"]]
+    total_messages = sum(int(row["message_count"]) for row in active_rows)
+    weighted_sum = sum(
+        int(row["message_count"]) * float(row["average_score"] or 0)
+        for row in active_rows
+    )
+    average_score = weighted_sum / total_messages if total_messages else None
+    return {
+        "total_messages": total_messages,
+        "average_score": average_score,
     }
 
 
@@ -330,7 +344,10 @@ async def list_tracked_videos(
     )
     result = await session.execute(query)
     items = [serialize_tracked_video_row(row) for row in result.all()]
-    return {"items": items}
+    return {
+        "items": items,
+        "global": serialize_global_summary(items),
+    }
 
 
 @app.delete("/v1/track/{video_id}")
@@ -338,8 +355,9 @@ async def delete_tracked_video(
     video_id: str,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
-    tracked = await get_tracked_video_or_404(session, video_id)
-    tracked.is_active = False
+    await get_tracked_video_or_404(session, video_id)
+    await session.execute(delete(Sentiment).where(Sentiment.video_id == video_id))
+    await session.execute(delete(TrackedVideo).where(TrackedVideo.video_id == video_id))
     await session.commit()
     return {"deleted": True, "video_id": video_id}
 
@@ -347,7 +365,10 @@ async def delete_tracked_video(
 @app.websocket("/live-feed")
 async def live_feed(websocket: WebSocket) -> None:
     await websocket.accept()
-    last_seen_id = 0
+    try:
+        last_seen_id = max(int(websocket.query_params.get("last_seen_id", "0")), 0)
+    except ValueError:
+        last_seen_id = 0
 
     try:
         while True:

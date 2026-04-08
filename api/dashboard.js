@@ -23,6 +23,8 @@ const state = {
   latestByVideo: new Map(),
   pendingVideoIds: new Set(),
   globalLatest: null,
+  lastSeenId: 0,
+  refreshTimerId: null,
 };
 
 function createAnalyticsSnapshot(videoId = null, title = "Global View") {
@@ -127,42 +129,6 @@ function markVideoFetched(videoId) {
 
   state.pendingVideoIds.delete(videoId);
   renderTrackedVideos();
-}
-
-function updateAnalyticsSnapshot(snapshot, score) {
-  if (!snapshot.hasData) {
-    snapshot.totalMessages = 1;
-    snapshot.averageScore = score;
-    snapshot.minScore = score;
-    snapshot.maxScore = score;
-    snapshot.hasData = true;
-    return;
-  }
-
-  const previousTotal = snapshot.totalMessages;
-  const nextTotal = previousTotal + 1;
-  snapshot.averageScore = ((snapshot.averageScore * previousTotal) + score) / nextTotal;
-  snapshot.totalMessages = nextTotal;
-  snapshot.minScore = Math.min(snapshot.minScore, score);
-  snapshot.maxScore = Math.max(snapshot.maxScore, score);
-}
-
-function updateTrackedVideoMiniStats(item) {
-  if (!item.video_id) {
-    return;
-  }
-
-  const tracked = findVideo(item.video_id);
-  if (!tracked) {
-    return;
-  }
-
-  const score = Number(item.score);
-  const previousCount = Number(tracked.message_count ?? 0);
-  const previousAverage = Number(tracked.average_score ?? 0);
-  const nextCount = previousCount + 1;
-  tracked.message_count = nextCount;
-  tracked.average_score = ((previousAverage * previousCount) + score) / nextCount;
 }
 
 function renderFeedItem(item) {
@@ -287,12 +253,16 @@ async function loadAnalytics() {
   const response = await fetch("/analytics");
   const payload = await response.json();
 
-  state.globalAnalytics = normalizeAnalytics(payload);
+  const snapshot = normalizeAnalytics(payload);
+  state.globalAnalytics.minScore = snapshot.minScore;
+  state.globalAnalytics.maxScore = snapshot.maxScore;
+  state.globalAnalytics.title = snapshot.title;
   state.globalLatest = null;
   state.latestByVideo.clear();
   feedList.innerHTML = "";
 
   for (const item of payload.recent ?? []) {
+    state.lastSeenId = Math.max(state.lastSeenId, Number(item.id ?? 0));
     if (!state.globalLatest) {
       state.globalLatest = item;
     }
@@ -311,6 +281,12 @@ async function loadTrackedVideos() {
   const response = await fetch("/v1/tracked");
   const payload = await response.json();
   state.trackedVideos = Array.isArray(payload.items) ? payload.items : [];
+
+  const global = payload.global ?? { total_messages: 0, average_score: null };
+  state.globalAnalytics.title = "Global View";
+  state.globalAnalytics.totalMessages = Number(global.total_messages ?? 0);
+  state.globalAnalytics.averageScore = Number(global.average_score ?? 0);
+  state.globalAnalytics.hasData = state.globalAnalytics.totalMessages > 0;
 
   for (const video of state.trackedVideos) {
     const snapshot = state.analyticsByVideo.get(video.video_id) ?? createAnalyticsSnapshot(
@@ -365,6 +341,32 @@ function selectVideo(videoId) {
   loadVideoAnalytics(videoId).catch((error) => {
     setTrackFeedback(error.message || "Unable to load video analytics.", true);
   });
+}
+
+function scheduleStatsRefresh() {
+  if (state.refreshTimerId !== null) {
+    return;
+  }
+
+  state.refreshTimerId = window.setTimeout(async () => {
+    state.refreshTimerId = null;
+
+    try {
+      if (state.activeVideoId) {
+        await Promise.all([
+          loadTrackedVideos(),
+          loadVideoAnalytics(state.activeVideoId),
+        ]);
+      } else {
+        await Promise.all([loadTrackedVideos(), loadAnalytics()]);
+      }
+    } catch (error) {
+      setTrackFeedback(
+        error.message || "Unable to refresh live analytics.",
+        true,
+      );
+    }
+  }, 250);
 }
 
 async function submitTrack(event) {
@@ -430,33 +432,33 @@ async function deleteTrackedVideo(videoId) {
 
 function connectLiveFeed() {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  const socket = new WebSocket(`${protocol}://${window.location.host}/live-feed`);
+  const socket = new WebSocket(
+    `${protocol}://${window.location.host}/live-feed?last_seen_id=${state.lastSeenId}`,
+  );
 
   socket.onmessage = (event) => {
     const item = JSON.parse(event.data);
-    const score = Number(item.score);
+    const itemId = Number(item.id ?? 0);
+    if (itemId <= state.lastSeenId) {
+      return;
+    }
+
+    state.lastSeenId = itemId;
 
     if (item.video_id) {
       markVideoFetched(item.video_id);
       state.latestByVideo.set(item.video_id, item);
-      updateTrackedVideoMiniStats(item);
-
-      const perVideoSnapshot = state.analyticsByVideo.get(item.video_id)
-        ?? createAnalyticsSnapshot(item.video_id, findVideo(item.video_id)?.title ?? item.video_id);
-      updateAnalyticsSnapshot(perVideoSnapshot, score);
-      state.analyticsByVideo.set(item.video_id, perVideoSnapshot);
     }
 
     state.globalLatest = item;
-    updateAnalyticsSnapshot(state.globalAnalytics, score);
-    renderTrackedVideos();
-    renderSummary();
     syncLatestPanel();
 
     feedList.prepend(renderFeedItem(item));
     while (feedList.children.length > 10) {
       feedList.removeChild(feedList.lastChild);
     }
+
+    scheduleStatsRefresh();
   };
 
   socket.onclose = () => {
@@ -474,9 +476,10 @@ globalViewButton.addEventListener("click", () => {
 trackForm.addEventListener("submit", submitTrack);
 
 Promise.all([loadAnalytics(), loadTrackedVideos()])
+  .then(() => {
+    connectLiveFeed();
+  })
   .catch((error) => {
     console.error(error);
     setTrackFeedback("Dashboard bootstrap failed. Check the API logs.", true);
   });
-
-connectLiveFeed();

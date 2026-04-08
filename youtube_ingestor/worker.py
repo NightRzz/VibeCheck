@@ -22,28 +22,30 @@ logger = logging.getLogger(__name__)
 @dataclass
 class RecentCommentCache:
     window: timedelta
-    entries: dict[str, dict[str, datetime]]
+    entries: dict[int, dict[str, datetime]]
 
-    def has_recent(self, video_id: str, comment_id: str, now: datetime) -> bool:
+    def has_recent(self, tracked_id: int, comment_id: str, now: datetime) -> bool:
         self.prune(now)
-        seen_at = self.entries.get(video_id, {}).get(comment_id)
+        seen_at = self.entries.get(tracked_id, {}).get(comment_id)
         return seen_at is not None and now - seen_at <= self.window
 
-    def remember(self, video_id: str, comment_id: str, now: datetime) -> None:
-        self.entries.setdefault(video_id, {})[comment_id] = now
+    def remember(self, tracked_id: int, comment_id: str, now: datetime) -> None:
+        self.entries.setdefault(tracked_id, {})[comment_id] = now
 
-    def sync_active_videos(self, active_video_ids: set[str]) -> None:
+    def sync_active_videos(self, active_tracked_ids: set[int]) -> None:
         stale_video_ids = [
-            video_id for video_id in self.entries if video_id not in active_video_ids
+            tracked_id
+            for tracked_id in self.entries
+            if tracked_id not in active_tracked_ids
         ]
-        for video_id in stale_video_ids:
-            self.entries.pop(video_id, None)
+        for tracked_id in stale_video_ids:
+            self.entries.pop(tracked_id, None)
 
     def prune(self, now: datetime) -> None:
         cutoff = now - self.window
         empty_video_ids: list[str] = []
 
-        for video_id, comments in self.entries.items():
+        for tracked_id, comments in self.entries.items():
             stale_comment_ids = [
                 comment_id
                 for comment_id, seen_at in comments.items()
@@ -52,10 +54,10 @@ class RecentCommentCache:
             for comment_id in stale_comment_ids:
                 comments.pop(comment_id, None)
             if not comments:
-                empty_video_ids.append(video_id)
+                empty_video_ids.append(tracked_id)
 
-        for video_id in empty_video_ids:
-            self.entries.pop(video_id, None)
+        for tracked_id in empty_video_ids:
+            self.entries.pop(tracked_id, None)
 
 
 def serialize_message(value: dict[str, object]) -> bytes:
@@ -80,6 +82,7 @@ async def publish_comment(
     payload = {
         "source_id": f"youtube:{video.video_id}",
         "video_id": video.video_id,
+        "external_id": comment.comment_id,
         "author": comment.author,
         "text": comment.text,
         "received_at": comment.published_at,
@@ -104,12 +107,12 @@ async def poll_video(
     new_comments = [
         comment
         for comment in reversed(comments)
-        if not cache.has_recent(video.video_id, comment.comment_id, now)
+        if not cache.has_recent(video.id, comment.comment_id, now)
     ]
 
     for comment in new_comments:
         await publish_comment(producer, video, comment)
-        cache.remember(video.video_id, comment.comment_id, now)
+        cache.remember(video.id, comment.comment_id, now)
 
     return len(new_comments)
 
@@ -135,7 +138,7 @@ async def run() -> None:
                 continue
 
             videos = await load_active_videos()
-            cache.sync_active_videos({video.video_id for video in videos})
+            cache.sync_active_videos({video.id for video in videos})
             if not videos:
                 await asyncio.sleep(settings.youtube_poll_interval_seconds)
                 continue
