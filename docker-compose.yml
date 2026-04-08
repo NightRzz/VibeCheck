@@ -70,31 +70,6 @@ services:
     volumes:
       - .:/app
 
-  producer:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: vibecheck-app:latest
-    container_name: vibecheck-producer
-    restart: unless-stopped
-    working_dir: /app
-    command: python -m uvicorn producer.main:app --host 0.0.0.0 --port 8001
-    environment:
-      DATABASE_URL: postgresql+asyncpg://vibecheck:vibecheck@postgres:5432/vibecheck
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
-      YOUTUBE_POLL_INTERVAL_SECONDS: ${YOUTUBE_POLL_INTERVAL_SECONDS:-5}
-      LIVE_FEED_POLL_INTERVAL_SECONDS: ${LIVE_FEED_POLL_INTERVAL_SECONDS:-0.25}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      kafka:
-        condition: service_started
-    ports:
-      - "8001:8001"
-    volumes:
-      - .:/app
-
   processor:
     build:
       context: .

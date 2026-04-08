@@ -1,1 +1,0 @@
-"""Producer package for VibeCheck."""

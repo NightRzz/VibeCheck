@@ -20,8 +20,7 @@ VibeCheck is composed of several independent microservices:
 1. **Frontend Dashboard (`frontend/`):** A Next.js application providing the user interface. It connects to the API via REST for statistics and WebSockets for the live feed.
 2. **API Service (`api/main.py`):** A FastAPI application that serves global and video-specific analytics, manages tracked streams, and broadcasts new sentiment rows to connected WebSocket clients.
 3. **YouTube Ingestor (`youtube_ingestor/worker.py`):** A background worker that continuously polls the YouTube API for new live chat comments across all tracked videos, publishing them to Kafka.
-4. **Producer Service (`producer/main.py`):** An optional FastAPI ingest API that exposes a `POST /ingest` endpoint to manually push messages onto the Kafka topic.
-5. **Sentiment Processor (`processor/worker.py`):** The core Kafka consumer. It reads raw messages, computes the sentiment score using TextBlob, and persists the data into PostgreSQL.
+4. **Sentiment Processor (`processor/worker.py`):** The core Kafka consumer. It reads raw messages, computes the sentiment score using TextBlob, and persists the data into PostgreSQL.
 
 ### Tech Stack
 - **Backend:** Python 3.11+, FastAPI, SQLAlchemy 2 (asyncpg)
@@ -36,11 +35,11 @@ The easiest way to run the entire stack locally is using Docker Compose.
 
 ### Prerequisites
 - Docker & Docker Compose
-- A YouTube Data API Key (Optional, but required to track real YouTube streams)
+- A YouTube Data API Key
 
 ### Running with Docker
 
-1. **(Optional) Set up your YouTube API Key:**
+1. **Set up your YouTube API Key:**
    Create a `.env` file in the root directory (or export the variable in your shell) and add your key:
    ```env
    YOUTUBE_API_KEY=your_api_key_here
@@ -50,31 +49,10 @@ The easiest way to run the entire stack locally is using Docker Compose.
    ```bash
    docker compose up -d --build
    ```
-   This will spin up PostgreSQL, Kafka, the API (`:8000`), the Producer (`:8001`), the background workers, and the Next.js Frontend (`:3000`).
+   This will spin up PostgreSQL, Kafka, the API (`:8000`), the background workers, and the Next.js Frontend (`:3000`).
 
 3. **View the Dashboard:**
    Open [http://localhost:3000](http://localhost:3000) in your browser.
-
-### Sending Test Traffic
-
-If you don't have a YouTube API key or want to test the pipeline manually, you can post messages directly to the ingestor:
-
-**PowerShell:**
-```powershell
-Invoke-RestMethod -Uri "http://localhost:8001/ingest" `
-  -Method Post `
-  -Headers @{"Content-Type"="application/json"} `
-  -Body '{"source_id":"manual_test","text":"This pipeline feels great."}'
-```
-
-**Bash / cURL:**
-```bash
-curl -X POST http://localhost:8001/ingest \
-  -H 'Content-Type: application/json' \
-  -d '{"source_id":"manual_test","text":"This pipeline feels great."}'
-```
-
-The dashboard will instantly reflect these updates in the live feed and recalculate the total count and average score.
 
 ## 💻 Local Development Setup
 
@@ -93,9 +71,6 @@ Run the backend components in separate terminals:
 ```bash
 # Dashboard API
 python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
-
-# Ingest API
-python -m uvicorn producer.main:app --host 0.0.0.0 --port 8001 --reload
 
 # Sentiment Processor Worker
 python processor/worker.py
@@ -122,9 +97,6 @@ The backend exposes several key endpoints on port `8000`:
 - `GET /v1/analytics/{video_id}`: Get sentiment statistics for a specific video.
 - `WebSocket /live-feed`: Global real-time stream of all processed messages.
 - `WebSocket /live-feed/{video_id}`: Real-time stream of messages for a specific video.
-
-The ingestor exposes an endpoint on port `8001`:
-- `POST /ingest`: Manually push a raw message into the pipeline.
 
 ## 📝 Notes & Future Improvements
 
