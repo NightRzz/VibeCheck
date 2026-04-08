@@ -31,30 +31,15 @@ python -m pip install -r requirements.txt
 
 ## Running locally
 
-If you want the shortest path, use the helper scripts.
-
-On Windows PowerShell:
-
-```powershell
-.\scripts\start-dev.ps1 -InstallDeps
-```
-
-On Linux or macOS shells:
+The easiest way to run the whole stack is using Docker Compose:
 
 ```bash
-./scripts/start-dev.sh --install-deps
+docker compose up -d --build
 ```
 
-Those scripts start PostgreSQL and Kafka with Docker Compose, then launch:
+This starts PostgreSQL, Kafka, the API (`:8000`), the producer (`:8001`), background workers, and the Next.js frontend (`:3000`).
 
-- the dashboard API on `http://localhost:8000`
-- the producer API on `http://localhost:8001`
-- the worker process that consumes Kafka and writes to Postgres
-- the Next.js frontend on `http://localhost:3000`
-
-The PowerShell script opens separate windows. The shell script runs the services in the background and stores logs and PID files in `.run/`.
-
-Open `http://localhost:3000` after the processes are up.
+Open `http://localhost:3000` to view the dashboard.
 
 ## Sending test traffic
 
@@ -75,25 +60,11 @@ curl -X POST http://localhost:8001/ingest \
   -d '{"source_id":"manual_test","text":"This pipeline feels great."}'
 ```
 
-If you want a stream of sample messages instead, use the helper scripts.
-
-PowerShell:
-
-```powershell
-.\scripts\send-sample-vibes.ps1 -Count 20 -DelayMs 500
-```
-
-Shell:
-
-```bash
-./scripts/send-sample-vibes.sh --count 20 --delay-ms 500
-```
-
 As new messages are processed, the dashboard updates the live feed, gauge, total count, average score, and range.
 
 ## Running components manually
 
-If you do not want to use the scripts, start infrastructure first:
+If you want to develop without running everything in Docker, start the infrastructure first:
 
 ```bash
 docker compose up -d postgres kafka
@@ -105,6 +76,15 @@ Then run these in separate terminals:
 python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 python -m uvicorn producer.main:app --host 0.0.0.0 --port 8001 --reload
 python processor/worker.py
+python youtube_ingestor/worker.py
+```
+
+For the frontend, run:
+
+```bash
+cd frontend
+npm install
+npm run dev
 ```
 
 ## API summary
