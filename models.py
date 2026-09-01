@@ -58,6 +58,10 @@ class TrackedVideo(Base):
         nullable=False,
         server_default=func.now(),
     )
+    live_chat_id: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
 
 
 class Sentiment(Base):

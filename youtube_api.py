@@ -13,10 +13,20 @@ class YouTubeApiError(RuntimeError):
     """Raised when the YouTube Data API returns an error response."""
 
 
+class LiveChatEndedError(YouTubeApiError):
+    """Raised when a live broadcast has ended or the live chat was not found."""
+
+
+class InvalidPageTokenError(YouTubeApiError):
+    """Raised when a continuation page token has expired or is invalid."""
+
+
 @dataclass(frozen=True)
 class YouTubeVideoMetadata:
     video_id: str
     title: str
+    live_chat_id: str | None = None
+    is_live: bool = False
 
 
 @dataclass(frozen=True)
@@ -81,7 +91,14 @@ def _extract_error_reason(payload: dict[str, object]) -> str | None:
         reason = item.get("reason")
         if isinstance(reason, str) and reason:
             return reason
-    return None
+def _safe_parse_json(response: httpx.Response) -> dict[str, object]:
+    try:
+        data = response.json()
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        raise YouTubeApiError(
+            f"Non-JSON response from YouTube API (HTTP {response.status_code}): {response.text[:200]}"
+        )
 
 
 async def fetch_video_metadata(
@@ -93,12 +110,12 @@ async def fetch_video_metadata(
     response = await client.get(
         f"{api_base_url}/videos",
         params={
-            "part": "snippet",
+            "part": "snippet,liveStreamingDetails",
             "id": video_id,
             "key": api_key,
         },
     )
-    payload = response.json()
+    payload = _safe_parse_json(response)
 
     if response.status_code != 200:
         raise YouTubeApiError(_extract_error_message(payload))
@@ -115,7 +132,15 @@ async def fetch_video_metadata(
     if not isinstance(title, str) or not title:
         raise YouTubeApiError("Video title was missing from the API response.")
 
-    return YouTubeVideoMetadata(video_id=video_id, title=title)
+    live_details = items[0].get("liveStreamingDetails") or {}
+    active_live_chat_id = live_details.get("activeLiveChatId")
+
+    return YouTubeVideoMetadata(
+        video_id=video_id,
+        title=title,
+        live_chat_id=active_live_chat_id if isinstance(active_live_chat_id, str) else None,
+        is_live=bool(active_live_chat_id),
+    )
 
 
 async def fetch_recent_comments(
@@ -136,7 +161,7 @@ async def fetch_recent_comments(
             "key": api_key,
         },
     )
-    payload = response.json()
+    payload = _safe_parse_json(response)
 
     if response.status_code != 200:
         if _extract_error_reason(payload) == "commentsDisabled":
@@ -187,3 +212,86 @@ async def fetch_recent_comments(
         )
 
     return comments
+
+
+async def fetch_live_chat_messages(
+    client: httpx.AsyncClient,
+    api_base_url: str,
+    api_key: str,
+    video_id: str,
+    live_chat_id: str,
+    page_token: str | None = None,
+    max_results: int = 200,
+) -> tuple[list[YouTubeComment], str | None, int]:
+    """Fetches real-time messages from YouTube Live Chat during an active broadcast.
+
+    Enforces Google YouTube Data API schema constraint: 200 <= maxResults <= 2000.
+    Returns:
+        tuple of (comments_list, next_page_token, polling_interval_ms)
+    """
+    bounded_max_results = max(200, min(2000, max_results))
+    params = {
+        "part": "snippet,authorDetails",
+        "liveChatId": live_chat_id,
+        "maxResults": bounded_max_results,
+        "key": api_key,
+    }
+    if page_token:
+        params["pageToken"] = page_token
+
+    response = await client.get(
+        f"{api_base_url}/liveChat/messages",
+        params=params,
+    )
+    payload = _safe_parse_json(response)
+
+    if response.status_code != 200:
+        error_reason = _extract_error_reason(payload)
+        if error_reason in {"liveChatEnded", "liveChatNotFound"}:
+            raise LiveChatEndedError(
+                f"YouTube live stream chat has ended ({error_reason}) for video {video_id}."
+            )
+        if error_reason == "invalidPageToken":
+            raise InvalidPageTokenError(
+                f"Continuation page token expired or invalid for video {video_id}."
+            )
+        if error_reason == "rateLimitExceeded":
+            return [], page_token, 5000
+        raise YouTubeApiError(_extract_error_message(payload))
+
+    next_page_token = payload.get("nextPageToken")
+    polling_interval_ms = int(payload.get("pollingIntervalMillis", 2000))
+
+    items = payload.get("items") or []
+    comments: list[YouTubeComment] = []
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        snippet = item.get("snippet", {})
+        author_details = item.get("authorDetails", {})
+
+        msg_id = item.get("id")
+        text = snippet.get("displayMessage")
+        published_at = snippet.get("publishedAt")
+        author = author_details.get("displayName")
+
+        if not isinstance(msg_id, str) or not msg_id:
+            continue
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if not isinstance(published_at, str) or not published_at:
+            continue
+
+        comments.append(
+            YouTubeComment(
+                comment_id=msg_id,
+                video_id=video_id,
+                author=author if isinstance(author, str) and author else None,
+                text=text.strip(),
+                published_at=published_at,
+            )
+        )
+
+    return comments, next_page_token, polling_interval_ms
