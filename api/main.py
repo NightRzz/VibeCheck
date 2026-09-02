@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+logger = logging.getLogger("api.main")
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import Select, and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database import SessionLocal, get_session, init_models
 from models import Sentiment, TrackedVideo
+from processor.sentiment_engine import SentimentEngine
+from processor.worker import TELEMETRY_PATH
+from ml.monitoring import REPORT_HTML_PATH, REPORT_JSON_PATH, generate_drift_report
 from youtube_api import YouTubeApiError, extract_video_id, fetch_video_metadata
 
 # Indexing Performance Gain
@@ -105,11 +111,14 @@ def serialize_analytics(
 def serialize_tracked_video_row(row: object) -> dict[str, object]:
     mapping = row._mapping
     average_score = mapping["average_score"]
+    live_chat_id = mapping.get("live_chat_id")
     return {
         "id": mapping["id"],
         "video_id": mapping["video_id"],
         "title": mapping["title"],
         "is_active": mapping["is_active"],
+        "is_live": bool(live_chat_id),
+        "live_chat_id": live_chat_id,
         "added_at": mapping["added_at"].isoformat(),
         "message_count": int(mapping["message_count"] or 0),
         "average_score": float(average_score) if average_score is not None else None,
@@ -304,11 +313,13 @@ async def track_video(
             video_id=metadata.video_id,
             title=metadata.title,
             is_active=True,
+            live_chat_id=metadata.live_chat_id,
         )
         session.add(tracked)
     else:
         tracked.title = metadata.title
         tracked.is_active = True
+        tracked.live_chat_id = metadata.live_chat_id
 
     await session.commit()
     await session.refresh(tracked)
@@ -317,6 +328,8 @@ async def track_video(
         "video_id": tracked.video_id,
         "title": tracked.title,
         "is_active": tracked.is_active,
+        "is_live": bool(tracked.live_chat_id),
+        "live_chat_id": tracked.live_chat_id,
         "added_at": tracked.added_at.isoformat(),
     }
 
@@ -331,6 +344,7 @@ async def list_tracked_videos(
             TrackedVideo.video_id,
             TrackedVideo.title,
             TrackedVideo.is_active,
+            TrackedVideo.live_chat_id,
             TrackedVideo.added_at,
             func.count(Sentiment.id).label("message_count"),
             func.avg(Sentiment.score).label("average_score"),
@@ -342,6 +356,7 @@ async def list_tracked_videos(
             TrackedVideo.video_id,
             TrackedVideo.title,
             TrackedVideo.is_active,
+            TrackedVideo.live_chat_id,
             TrackedVideo.added_at,
         )
         .order_by(TrackedVideo.is_active.desc(), TrackedVideo.added_at.desc())
@@ -369,10 +384,18 @@ async def delete_tracked_video(
 @app.websocket("/live-feed/{video_id}")
 async def live_feed_by_video(websocket: WebSocket, video_id: str) -> None:
     await websocket.accept()
-    try:
-        last_seen_id = max(int(websocket.query_params.get("last_seen_id", "0")), 0)
-    except ValueError:
-        last_seen_id = 0
+    param = websocket.query_params.get("last_seen_id")
+    if param is not None:
+        try:
+            last_seen_id = max(int(param), 0)
+        except ValueError:
+            last_seen_id = 0
+    else:
+        async with SessionLocal() as session:
+            max_id = await session.scalar(
+                select(func.max(Sentiment.id)).where(Sentiment.video_id == video_id)
+            )
+            last_seen_id = max_id or 0
 
     try:
         while True:
@@ -406,10 +429,16 @@ async def live_feed_by_video(websocket: WebSocket, video_id: str) -> None:
 @app.websocket("/live-feed")
 async def live_feed(websocket: WebSocket) -> None:
     await websocket.accept()
-    try:
-        last_seen_id = max(int(websocket.query_params.get("last_seen_id", "0")), 0)
-    except ValueError:
-        last_seen_id = 0
+    param = websocket.query_params.get("last_seen_id")
+    if param is not None:
+        try:
+            last_seen_id = max(int(param), 0)
+        except ValueError:
+            last_seen_id = 0
+    else:
+        async with SessionLocal() as session:
+            max_id = await session.scalar(select(func.max(Sentiment.id)))
+            last_seen_id = max_id or 0
 
     try:
         while True:
@@ -436,3 +465,110 @@ async def live_feed(websocket: WebSocket) -> None:
             await asyncio.sleep(settings.live_feed_poll_interval_seconds)
     except WebSocketDisconnect:
         return
+
+
+_ML_ENGINE: SentimentEngine | None = None
+_DRIFT_LOCK = asyncio.Lock()
+
+
+def get_engine_singleton() -> SentimentEngine:
+    global _ML_ENGINE
+    if _ML_ENGINE is None:
+        _ML_ENGINE = SentimentEngine()
+    return _ML_ENGINE
+
+
+async def _fetch_current_sentiments(session: AsyncSession, limit: int = 1000):
+    try:
+        result = await session.execute(
+            select(Sentiment.text, Sentiment.score).order_by(Sentiment.timestamp.desc()).limit(limit)
+        )
+        rows = result.all()
+        import pandas as pd
+        return pd.DataFrame([{"text": r[0], "score": r[1]} for r in rows])
+    except Exception as exc:
+        logger.warning("Could not fetch sentiments from database: %s", exc)
+        import pandas as pd
+        return pd.DataFrame()
+
+
+@app.get("/v1/ml/stats")
+async def ml_engine_stats() -> dict[str, object]:
+    """Returns real-time inference latency percentiles and LRU cache efficiency metrics.
+    
+    Prefers live worker telemetry recorded across process boundaries.
+    """
+    if TELEMETRY_PATH.exists():
+        try:
+            return json.loads(TELEMETRY_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    try:
+        engine = get_engine_singleton()
+        return engine.get_metrics()
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="ML model pipeline artifact not initialized. Run 'python -m ml.train'.",
+        ) from exc
+
+
+@app.get("/v1/ml/drift-report", response_class=FileResponse)
+async def get_drift_report(
+    refresh: bool = False,
+    session: AsyncSession = Depends(get_session),
+) -> FileResponse:
+    """Serves the latest Evidently AI Data & Prediction Drift interactive HTML dashboard.
+    
+    Generates reports in an asynchronous worker thread to prevent event-loop starvation.
+    """
+    if refresh or not REPORT_HTML_PATH.exists():
+        async with _DRIFT_LOCK:
+            if refresh or not REPORT_HTML_PATH.exists():
+                try:
+                    current_df = await _fetch_current_sentiments(session)
+                    await asyncio.to_thread(generate_drift_report, current_df=current_df)
+                except FileNotFoundError as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Reference baseline dataset not found. Run 'python -m ml.train'.",
+                    ) from exc
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to generate drift report: {exc}",
+                    ) from exc
+    return FileResponse(REPORT_HTML_PATH, media_type="text/html")
+
+
+@app.get("/v1/ml/drift-metrics")
+async def get_drift_metrics(
+    refresh: bool = False,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    """Returns Evidently AI drift detection summary in JSON for automated health monitoring."""
+    if refresh or not REPORT_JSON_PATH.exists():
+        async with _DRIFT_LOCK:
+            if refresh or not REPORT_JSON_PATH.exists():
+                try:
+                    current_df = await _fetch_current_sentiments(session)
+                    await asyncio.to_thread(generate_drift_report, current_df=current_df)
+                except FileNotFoundError as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Reference baseline dataset not found. Run 'python -m ml.train'.",
+                    ) from exc
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to generate drift metrics: {exc}",
+                    ) from exc
+
+    if REPORT_JSON_PATH.exists():
+        try:
+            return json.loads(REPORT_JSON_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"status": "generated", "path": str(REPORT_JSON_PATH)}
+
