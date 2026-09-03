@@ -6,3 +6,12 @@ __pycache__/
 venv/
 .env
 .run/
+mlruns/
+.trash/
+ml/data_cache/
+mlflow.db
+*.db
+ml/artifacts/onnx/*.onnx
+api/static/*.html
+api/static/*.json
+GEMINI.md
