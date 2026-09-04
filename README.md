@@ -4,7 +4,9 @@ VibeCheck is an event-driven, production-grade sentiment analysis streaming and 
 
 It continuously ingests live chat streams via Apache Kafka, computes sentiment scores using a CPU-optimized **Contextual Deep Learning Transformer (Twitter-RoBERTa-base ONNX INT8)** with in-memory **LRU prediction caching**, and streams real-time analytics to a Next.js dashboard via WebSockets. It includes full **MLflow** experiment tracking and continuous **Data & Prediction Drift monitoring** powered by **Evidently AI**.
 
----
+
+<img width="1776" height="1217" alt="uFqiqIi" src="https://github.com/user-attachments/assets/18e5afb2-0c8b-4fed-8f76-b03c60a84c0d" />
+
 
 ## Key Features
 
